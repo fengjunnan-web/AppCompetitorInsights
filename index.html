@@ -899,9 +899,13 @@
         let folderTimeline = null;
         let folderPreloadPending = false;
         let queuedFolderCard = null;
+        let nearbyPrefetchTimer = 0;
         let pointerHoveredCard = null;
         let lottieRequested = false;
         let keyboardFocusMode = false;
+        const archiveUrlCache = new WeakMap();
+        const archivePrefetches = new Map();
+        const maxArchivePrefetchRecords = 6;
 
         const getCardTitle = (card) => card.querySelector('.event-name').textContent.trim();
         const getCardTime = (card) => card.querySelector('.event-time').textContent.trim();
@@ -1262,6 +1266,8 @@
         };
 
         const buildArchiveUrl = (card) => {
+          const cachedUrl = archiveUrlCache.get(card);
+          if (cachedUrl) return new URL(cachedUrl);
           let archiveSource = card.dataset.archiveSrc;
           if (!archiveSource) return null;
           const isRootFilePreview = window.location.protocol === 'file:'
@@ -1273,7 +1279,52 @@
           if (['127.0.0.1', 'localhost'].includes(window.location.hostname)) {
             archiveUrl.searchParams.set('preview', String(Date.now()));
           }
-          return archiveUrl;
+          archiveUrlCache.set(card, archiveUrl.href);
+          return new URL(archiveUrl.href);
+        };
+
+        const prefetchArchive = (card) => {
+          const archiveUrl = buildArchiveUrl(card);
+          if (!archiveUrl) return Promise.resolve(false);
+          const existing = archivePrefetches.get(archiveUrl.href);
+          if (existing) {
+            archivePrefetches.delete(archiveUrl.href);
+            archivePrefetches.set(archiveUrl.href, existing);
+            return existing;
+          }
+
+          const request = window.fetch(archiveUrl.href, {
+            cache: 'force-cache',
+            credentials: 'same-origin',
+          }).then(async (response) => {
+            if (!response.ok) return false;
+            const html = await response.text();
+            const documentCopy = new DOMParser().parseFromString(html, 'text/html');
+            const essentialImages = [...documentCopy.querySelectorAll('img[src]')]
+              .filter((image) => image.getAttribute('loading') !== 'lazy')
+              .map((image) => new URL(image.getAttribute('src'), archiveUrl).href)
+              .filter((url) => !url.startsWith('data:'));
+            await Promise.allSettled(essentialImages.map((url) => window.fetch(url, {
+              cache: 'force-cache',
+              credentials: 'same-origin',
+            })));
+            return true;
+          }).catch(() => false);
+          archivePrefetches.set(archiveUrl.href, request);
+          if (archivePrefetches.size > maxArchivePrefetchRecords) {
+            archivePrefetches.delete(archivePrefetches.keys().next().value);
+          }
+          return request;
+        };
+
+        const queueNearbyArchivePrefetch = (card) => {
+          window.clearTimeout(nearbyPrefetchTimer);
+          nearbyPrefetchTimer = window.setTimeout(() => {
+            const selectedIndex = cards.indexOf(card);
+            [cards[selectedIndex - 1], cards[selectedIndex + 1]]
+              .filter(Boolean)
+              .forEach((nearbyCard) => { void prefetchArchive(nearbyCard); });
+          }, 350);
         };
 
         const watchArchiveFrame = (frame) => {
@@ -1311,9 +1362,12 @@
 
           return new Promise((resolve) => {
             let settled = false;
+            let readyPoll = 0;
+            let timeout = 0;
             const finish = (loaded) => {
               if (settled) return;
               settled = true;
+              window.clearInterval(readyPoll);
               window.clearTimeout(timeout);
               if (!loaded) {
                 resolve(null);
@@ -1325,7 +1379,19 @@
                 requestAnimationFrame(() => resolve(frame));
               });
             };
-            const timeout = window.setTimeout(() => finish(false), 2500);
+            const checkDocumentReady = () => {
+              try {
+                const isTargetDocument = frame.contentWindow.location.href === archiveUrl.href;
+                const readyState = frame.contentDocument?.readyState;
+                if (isTargetDocument && (readyState === 'interactive' || readyState === 'complete')) {
+                  finish(true);
+                }
+              } catch {
+                // Same-origin archive editions are expected; load/error remains the fallback.
+              }
+            };
+            timeout = window.setTimeout(() => finish(false), 8000);
+            readyPoll = window.setInterval(checkDocumentReady, 16);
             frame.addEventListener('load', () => finish(true), { once: true });
             frame.addEventListener('error', () => finish(false), { once: true });
             frame.src = archiveUrl.href;
@@ -1452,9 +1518,23 @@
           archiveFolder.classList.add('is-restacking');
           folderPreloadPending = true;
 
-          const incomingFrame = await preloadArchive(card, incomingPage);
+          const anticipationTween = window.gsap.to(outgoingPage, {
+            y: -liftDistance,
+            duration: liftDuration,
+            ease: 'back.out(1.1)',
+            overwrite: 'auto',
+          });
+          const minimumAnticipation = new Promise((resolve) => {
+            window.setTimeout(resolve, liftDuration * 1000);
+          });
+          const [incomingFrame] = await Promise.all([
+            preloadArchive(card, incomingPage),
+            minimumAnticipation,
+          ]);
+          anticipationTween.kill();
           folderPreloadPending = false;
           if (!incomingFrame || selectedCard !== card) {
+            window.gsap.set(outgoingPage, { clearProps: 'transform' });
             incomingPage.remove();
             outgoingPage.classList.remove('archive-page--outgoing');
             archiveFolder.classList.remove('is-restacking');
@@ -1483,28 +1563,23 @@
 
           timeline
             .to(outgoingPage, {
-              y: -liftDistance,
-              duration: liftDuration,
-              ease: 'back.out(1.1)',
+              y: dropDistance,
+              z: 110,
+              scale: 1.008,
+              boxShadow: historyTargets[historyTargets.length - 1].boxShadow,
+              duration: 0.42,
+              ease: 'power3.in',
             }, 0)
-        .to(outgoingPage, {
-          y: dropDistance,
-          z: 110,
-          scale: 1.008,
-          boxShadow: historyTargets[historyTargets.length - 1].boxShadow,
-          duration: 0.42,
-          ease: 'power3.in',
-        }, liftDuration)
             .to(incomingPage, {
               ...frontTarget,
               duration: 0.72,
               ease: 'power2.inOut',
-            }, 0.18)
+            }, 0.02)
             .to(historySheets[0], {
               opacity: 0,
               duration: 0.2,
               ease: 'power1.out',
-            }, 0.18);
+            }, 0.02);
 
           historySheets.slice(1).forEach((sheet, index) => {
             timeline.to(sheet, {
@@ -1621,6 +1696,7 @@
           mountAnimatedEye(card);
           centerCard(card);
           restackFolder(card, { instant: initial });
+          queueNearbyArchivePrefetch(card);
           requestPerspectiveUpdate();
         };
 
@@ -1701,10 +1777,13 @@
           surface.setAttribute('aria-label', `Open ${getCardTitle(card)}`);
           surface.addEventListener('focus', () => {
             surface.classList.toggle('is-keyboard-focus', keyboardFocusMode);
+            void prefetchArchive(card);
           });
           surface.addEventListener('blur', () => {
             surface.classList.remove('is-keyboard-focus');
           });
+          surface.addEventListener('pointerenter', () => { void prefetchArchive(card); });
+          surface.addEventListener('pointerdown', () => { void prefetchArchive(card); }, { passive: true });
           surface.addEventListener('click', () => selectCard(card));
           surface.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') {
