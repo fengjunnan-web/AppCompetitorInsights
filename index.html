@@ -565,7 +565,6 @@
       z-index: 5;
       overflow: hidden;
       pointer-events: none;
-      visibility: hidden;
       box-shadow: none;
       will-change: transform, box-shadow;
       }
@@ -585,6 +584,59 @@
       .content-placeholder.archive-page--incoming.is-preloaded {
         visibility: visible;
       }
+      .content-placeholder.is-loading-edition {
+        overflow: hidden;
+        pointer-events: none;
+      }
+      .archive-loading-shell {
+        position: absolute;
+        inset: 0;
+        z-index: 9;
+        padding: clamp(24px, 3.8vw, 52px);
+        color: #181818;
+        background: #fff;
+        pointer-events: none;
+      }
+      .archive-loading-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 24px;
+        padding-bottom: 24px;
+        border-bottom: 1px solid #dedede;
+      }
+      .archive-loading-brand {
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(20px, 2.2vw, 34px);
+      }
+      .archive-loading-date {
+        color: #767676;
+        font-size: 11px;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+      .archive-loading-rule {
+        width: 38%;
+        height: 12px;
+        margin-top: 26px;
+        background: #ededed;
+      }
+      .archive-loading-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(180px, 0.8fr);
+        gap: clamp(20px, 3vw, 38px);
+        margin-top: 30px;
+      }
+      .archive-loading-media,
+      .archive-loading-copy-line { background: #ededed; }
+      .archive-loading-media { aspect-ratio: 1.5; }
+      .archive-loading-copy { padding-top: 10px; }
+      .archive-loading-copy-line {
+        height: 18px;
+        margin-bottom: 14px;
+      }
+      .archive-loading-copy-line:nth-child(2) { width: 84%; }
+      .archive-loading-copy-line:nth-child(3) { width: 62%; }
       html[data-bend-lab-mode="bend"]
       .content-placeholder.has-archive.archive-page--outgoing {
         overflow: visible;
@@ -792,6 +844,14 @@
           padding: 0 14px;
           font-size: 0.54rem;
         }
+        .archive-loading-shell { padding: 28px 16px; }
+        .archive-loading-header { padding-bottom: 18px; }
+        .archive-loading-grid {
+          grid-template-columns: 1fr;
+          gap: 18px;
+          margin-top: 24px;
+        }
+        .archive-loading-copy { display: none; }
         .panel-head { align-items: flex-start; flex-direction: column; margin-bottom: 26px; }
         .view-switch { width: 100%; justify-content: space-between; }
         .view-switch button { flex: 1; }
@@ -1298,16 +1358,7 @@
             credentials: 'same-origin',
           }).then(async (response) => {
             if (!response.ok) return false;
-            const html = await response.text();
-            const documentCopy = new DOMParser().parseFromString(html, 'text/html');
-            const essentialImages = [...documentCopy.querySelectorAll('img[src]')]
-              .filter((image) => image.getAttribute('loading') !== 'lazy')
-              .map((image) => new URL(image.getAttribute('src'), archiveUrl).href)
-              .filter((url) => !url.startsWith('data:'));
-            await Promise.allSettled(essentialImages.map((url) => window.fetch(url, {
-              cache: 'force-cache',
-              credentials: 'same-origin',
-            })));
+            await response.text();
             return true;
           }).catch(() => false);
           archivePrefetches.set(archiveUrl.href, request);
@@ -1321,7 +1372,10 @@
           window.clearTimeout(nearbyPrefetchTimer);
           nearbyPrefetchTimer = window.setTimeout(() => {
             const selectedIndex = cards.indexOf(card);
-            [cards[selectedIndex - 1], cards[selectedIndex + 1]]
+            const nearbyCards = selectedIndex === 0
+              ? cards.slice(1, maxArchivePrefetchRecords)
+              : [cards[selectedIndex - 1], cards[selectedIndex + 1]];
+            nearbyCards
               .filter(Boolean)
               .forEach((nearbyCard) => { void prefetchArchive(nearbyCard); });
           }, 350);
@@ -1350,17 +1404,35 @@
 
         const preloadArchive = (card, targetPanel) => {
           const archiveUrl = buildArchiveUrl(card);
-          if (!archiveUrl) return Promise.resolve(null);
+          if (!archiveUrl) return { frame: null, ready: Promise.resolve(null) };
 
           const frame = document.createElement('iframe');
           frame.className = 'archive-frame';
           frame.title = `${getCardTitle(card)} AI Design Product digest`;
           frame.setAttribute('aria-label', frame.title);
           watchArchiveFrame(frame);
-          targetPanel.classList.add('has-archive');
+          const loadingShell = document.createElement('div');
+          loadingShell.className = 'archive-loading-shell';
+          loadingShell.setAttribute('aria-hidden', 'true');
+          loadingShell.innerHTML = `
+            <div class="archive-loading-header">
+              <span class="archive-loading-brand">AI Design Product</span>
+              <span class="archive-loading-date">${getCardTitle(card)}</span>
+            </div>
+            <div class="archive-loading-rule"></div>
+            <div class="archive-loading-grid">
+              <div class="archive-loading-media"></div>
+              <div class="archive-loading-copy">
+                <div class="archive-loading-copy-line"></div>
+                <div class="archive-loading-copy-line"></div>
+                <div class="archive-loading-copy-line"></div>
+              </div>
+            </div>`;
+          targetPanel.classList.add('has-archive', 'is-loading-edition');
           targetPanel.append(frame);
+          targetPanel.append(loadingShell);
 
-          return new Promise((resolve) => {
+          const ready = new Promise((resolve) => {
             let settled = false;
             let readyPoll = 0;
             let timeout = 0;
@@ -1375,6 +1447,8 @@
               }
               applyArchiveEmbedLayout(frame);
               targetPanel.classList.add('is-preloaded');
+              targetPanel.classList.remove('is-loading-edition');
+              loadingShell.remove();
               requestAnimationFrame(() => {
                 requestAnimationFrame(() => resolve(frame));
               });
@@ -1396,6 +1470,7 @@
             frame.addEventListener('error', () => finish(false), { once: true });
             frame.src = archiveUrl.href;
           });
+          return { frame, ready };
         };
 
         const readSheetNumber = (element, property, fallback = 0) => {
@@ -1518,23 +1593,9 @@
           archiveFolder.classList.add('is-restacking');
           folderPreloadPending = true;
 
-          const anticipationTween = window.gsap.to(outgoingPage, {
-            y: -liftDistance,
-            duration: liftDuration,
-            ease: 'back.out(1.1)',
-            overwrite: 'auto',
-          });
-          const minimumAnticipation = new Promise((resolve) => {
-            window.setTimeout(resolve, liftDuration * 1000);
-          });
-          const [incomingFrame] = await Promise.all([
-            preloadArchive(card, incomingPage),
-            minimumAnticipation,
-          ]);
-          anticipationTween.kill();
+          const { frame: incomingFrame, ready: incomingReady } = preloadArchive(card, incomingPage);
           folderPreloadPending = false;
           if (!incomingFrame || selectedCard !== card) {
-            window.gsap.set(outgoingPage, { clearProps: 'transform' });
             incomingPage.remove();
             outgoingPage.classList.remove('archive-page--outgoing');
             archiveFolder.classList.remove('is-restacking');
@@ -1543,9 +1604,12 @@
             runQueuedFolderSelection();
             return;
           }
-          window.dispatchEvent(new CustomEvent('archive-bend-lab:prepare-edition', {
-            detail: { frame: incomingFrame },
-          }));
+          void incomingReady.then((loadedFrame) => {
+            if (!loadedFrame || selectedCard !== card) return;
+            window.dispatchEvent(new CustomEvent('archive-bend-lab:prepare-edition', {
+              detail: { frame: loadedFrame },
+            }));
+          });
 
           const timeline = window.gsap.timeline({
             defaults: { overwrite: 'auto' },
@@ -1563,23 +1627,28 @@
 
           timeline
             .to(outgoingPage, {
+              y: -liftDistance,
+              duration: liftDuration,
+              ease: 'back.out(1.1)',
+            }, 0)
+            .to(outgoingPage, {
               y: dropDistance,
               z: 110,
               scale: 1.008,
               boxShadow: historyTargets[historyTargets.length - 1].boxShadow,
               duration: 0.42,
               ease: 'power3.in',
-            }, 0)
+            }, liftDuration)
             .to(incomingPage, {
               ...frontTarget,
               duration: 0.72,
               ease: 'power2.inOut',
-            }, 0.02)
+            }, 0.18)
             .to(historySheets[0], {
               opacity: 0,
               duration: 0.2,
               ease: 'power1.out',
-            }, 0.02);
+            }, 0.18);
 
           historySheets.slice(1).forEach((sheet, index) => {
             timeline.to(sheet, {
