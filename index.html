@@ -1368,6 +1368,19 @@
           return request;
         };
 
+        const prepareArchiveTexture = (card) => {
+          const archiveUrl = buildArchiveUrl(card);
+          if (!archiveUrl) return;
+          window.dispatchEvent(new CustomEvent('archive-bend-lab:prepare-url', {
+            detail: { url: archiveUrl.href },
+          }));
+        };
+
+        const warmArchive = (card) => {
+          void prefetchArchive(card);
+          prepareArchiveTexture(card);
+        };
+
         const queueNearbyArchivePrefetch = (card) => {
           window.clearTimeout(nearbyPrefetchTimer);
           nearbyPrefetchTimer = window.setTimeout(() => {
@@ -1378,6 +1391,9 @@
             nearbyCards
               .filter(Boolean)
               .forEach((nearbyCard) => { void prefetchArchive(nearbyCard); });
+            [cards[selectedIndex - 1], cards[selectedIndex + 1]]
+              .filter(Boolean)
+              .forEach(prepareArchiveTexture);
           }, 350);
         };
 
@@ -1764,6 +1780,7 @@
           cards.forEach((item) => item.querySelector('.event-card').classList.toggle('is-selected', item === card));
           mountAnimatedEye(card);
           centerCard(card);
+          prepareArchiveTexture(card);
           restackFolder(card, { instant: initial });
           queueNearbyArchivePrefetch(card);
           requestPerspectiveUpdate();
@@ -1846,13 +1863,13 @@
           surface.setAttribute('aria-label', `Open ${getCardTitle(card)}`);
           surface.addEventListener('focus', () => {
             surface.classList.toggle('is-keyboard-focus', keyboardFocusMode);
-            void prefetchArchive(card);
+            warmArchive(card);
           });
           surface.addEventListener('blur', () => {
             surface.classList.remove('is-keyboard-focus');
           });
-          surface.addEventListener('pointerenter', () => { void prefetchArchive(card); });
-          surface.addEventListener('pointerdown', () => { void prefetchArchive(card); }, { passive: true });
+          surface.addEventListener('pointerenter', () => { warmArchive(card); });
+          surface.addEventListener('pointerdown', () => { warmArchive(card); }, { passive: true });
           surface.addEventListener('click', () => selectCard(card));
           surface.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') {
@@ -2218,6 +2235,7 @@
           let routeIntroTrace = [];
           let foldBandClip = 'inset(100% 0 0 0)';
           const textureCache = new Map();
+          const maxTextureCacheEntries = 6;
           const routeIntroHoldMilliseconds = 10;
           const routeIntroThresholds = [0.25, 0.5, 0.75, 0.9];
           root.dataset.bendLabRouteIntroHold = String(routeIntroHoldMilliseconds);
@@ -2935,12 +2953,22 @@
 
           const getPreparedTexture = (descriptor) => {
             if (textureCache.has(descriptor.url)) {
-              return textureCache.get(descriptor.url);
+              const cached = textureCache.get(descriptor.url);
+              textureCache.delete(descriptor.url);
+              textureCache.set(descriptor.url, cached);
+              return cached;
             }
             const promise = new Promise((resolve, reject) => {
               const image = new Image();
               image.decoding = 'async';
-              image.onload = () => resolve(image);
+              image.onload = async () => {
+                try {
+                  if (typeof image.decode === 'function') await image.decode();
+                } catch {
+                  // The loaded image remains usable if explicit decoding rejects.
+                }
+                resolve(image);
+              };
               image.onerror = () => reject(
                 new Error(`${descriptor.edition} texture failed`),
               );
@@ -2950,6 +2978,9 @@
               throw error;
             });
             textureCache.set(descriptor.url, promise);
+            if (textureCache.size > maxTextureCacheEntries) {
+              textureCache.delete(textureCache.keys().next().value);
+            }
             return promise;
           };
 
@@ -3054,6 +3085,10 @@
           loadOriginal(originalFrame);
 
           return {
+            prepareEdition(editionUrl) {
+              if (!editionUrl) return Promise.resolve(null);
+              return prepareTexture(editionUrl);
+            },
             prepareOriginal(nextOriginal) {
               if (!nextOriginal?.src) return Promise.resolve(null);
               return prepareTexture(nextOriginal.src);
@@ -3165,6 +3200,9 @@
 
         window.addEventListener('archive-bend-lab:prepare-edition', (event) => {
           renderer?.prepareOriginal(event.detail?.frame);
+        });
+        window.addEventListener('archive-bend-lab:prepare-url', (event) => {
+          renderer?.prepareEdition(event.detail?.url);
         });
         motionQuery.addEventListener('change', () => {
           disable();
